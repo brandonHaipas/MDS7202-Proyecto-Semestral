@@ -23,25 +23,7 @@ productos_df[productos_categories] = productos_df[productos_categories].astype('
 # random state definition
 RANDOM_STATE = 99
 
-def load_data(**kwargs):
-    """
-    loads de data based on the date of execution (ds)
-    takes all the rows from transacciones.parquet where the dates are below ds, 
-    then creates a dataframe and saves it to the /date/raw folder
-    """
-    curr_date_str = f"{kwargs.get('ds')}"
-    date_format = "%Y-%m-%d"
-    exec_date = datetime.strptime(curr_date_str, date_format)
-    last_date = exec_date + timedelta(days=7)
-    
-    # this lines might change because it's not a fact that everyweek there'll be a purchase, but as we have transacciones.parquet we know it's the case
-    # fourth assumption: every week there's at least one purchase
-    this_week_df = transacciones_df[(transacciones_df['purchase_date'].to_pydatetime() >= exec_date) & (transacciones_df['purchase_date'].to_pydatetime()< last_date)]
-    prev_transaccions_df = transacciones_df[transacciones_df['purchase_date'].to_pydatetime() < exec_date]
 
-    prev_transaccions_df.to_parquet(f"{home_dir}/{curr_date_str}/raw/raw_prev_transacc.parquet")
-    this_week_df.to_parquet(f"{home_dir}/{curr_date_str}/raw/raw_week_transacc.parquet")
-    return
 
 def drop_suspicious_purchases(transactions):
     """
@@ -105,11 +87,26 @@ def add_negative_class_rows(df, how='inbalanced'):
 
     return pd.concat([df, sodai_negative_df])
 
-def preprocess_data(**kwargs):
+
+def load_and_preprocess_data(**kwargs):
     """
-    this function joins the datasets saved in /airflow/date/raw with client and product metadata, then saves the final datasets in preprocess 
+    loads de data based on the date of execution (ds)
+    takes all the rows from transacciones.parquet where the dates are below ds, 
+    then creates a dataframe and saves it to the /date/raw folder
+    and finally joins the datasets saved in /airflow/date/raw with client and product metadata, then saves the final datasets in preprocess 
     """
     curr_date_str = f"{kwargs.get('ds')}"
+    date_format = "%Y-%m-%d"
+    exec_date = datetime.strptime(curr_date_str, date_format)
+    last_date = exec_date + timedelta(days=7)
+
+    # this lines might change because it's not a fact that everyweek there'll be a purchase, but as we have transacciones.parquet we know it's the case
+    # fourth assumption: every week there's at least one purchase
+    this_week_df = transacciones_df[(transacciones_df['purchase_date'].to_pydatetime() >= exec_date) & (transacciones_df['purchase_date'].to_pydatetime()< last_date)]
+    prev_transaccions_df = transacciones_df[transacciones_df['purchase_date'].to_pydatetime() < exec_date]
+
+    prev_transaccions_df.to_parquet(f"{home_dir}/{curr_date_str}/raw/raw_prev_transacc.parquet")
+    this_week_df.to_parquet(f"{home_dir}/{curr_date_str}/raw/raw_week_transacc.parquet")
 
     # first we obtain the dataframes
     prev_transac_df = pd.read_parquet(f"{home_dir}/{curr_date_str}/raw/raw_prev_transacc.parquet")
@@ -134,6 +131,5 @@ def preprocess_data(**kwargs):
 
     # save the preprocessed dataframes in the folders
     by_week_prev.to_parquet(f"{home_dir}/{curr_date_str}/preprocessed/preprocessed_prev.parquet")
-    by_week_this_week.to_parquet(f"{home_dir}/{curr_date_str}/preprocessed/preprocessed_prev.parquet")
-
+    by_week_this_week.to_parquet(f"{home_dir}/{curr_date_str}/preprocessed/preprocessed_current.parquet")
     return
