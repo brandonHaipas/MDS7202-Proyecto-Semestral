@@ -1,39 +1,22 @@
+import os
 import pandas as pd
+import mlflow
+import pickle
+import json
+import optuna
+from optuna.samplers import TPESampler
+from optuna.visualization.matplotlib import plot_optimization_history, plot_param_importances
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import FunctionTransformer, MinMaxScaler, OneHotEncoder
-import os
-from math import ceil
+from sklearn.metrics import f1_score
+from sklearn.linear_model import LogisticRegression
+from xgboost import XGBClassifier
+from lightgbm import LGBMClassifier
 
 seed = 999
 home_dir = os.getenv("AIRFLOW_HOME")
 
-def undersample(df, how='imbalanced'):
-    # Separar dataframes por clase
-    neg_df = df[df['buy'] == 0]
-    pos_df = df[df['buy'] == 1]
-
-    # Obtener tamaño de clase minoritaria
-    minority_size = min(len(neg_df), len(pos_df))
-
-    if how == 'balanced':
-        # Undersample the majority class
-        neg_df_undersampled = neg_df.sample(minority_size, random_state=seed)
-        pos_df_undersampled = pos_df.sample(minority_size, random_state=seed)
-
-    else:
-        if len(neg_df) < len(pos_df):
-            # Undersample the majority class
-            neg_df_undersampled = neg_df.sample(minority_size, random_state=seed)
-            pos_df_undersampled = pos_df.sample(minority_size * 5, random_state=seed)
-        else:
-            # Undersample the majority class
-            neg_df_undersampled = neg_df.sample(minority_size * 5, random_state=seed)
-            pos_df_undersampled = pos_df.sample(minority_size, random_state=seed)
-
-    # Combine and preserve temporal order
-    df_undersampled = pd.concat([neg_df_undersampled, pos_df_undersampled]).sort_values(by='week')
-    return df_undersampled
 
 
 def create_custom_vars(df):
@@ -78,38 +61,113 @@ def create_custom_vars(df):
 
     return df
 
-# this split works well with 10 weeks onward, so the dag should start from the 11th week, that way our preprocessed dataframe has 10 weeks
-# fifth assumption: the dag will have an execution start date 
-def week_split(df):
-    """
-    split weeks into 70, 20 and 10 percent ratio roughly
-    """
-    
-    min_week = min(df['week'])
-    week_number = len(df['week'].value_counts().index) # the exact number of unique weeks
-    upper_train_limit = ceil(min_week + 0.7*week_number -1)
-    upper_val_limit = ceil(min_week + 0.9*week_number -1)
-    lower_test_limit = upper_val_limit + 1
-    
-    train_df = undersample(df[df['week'] <= upper_train_limit], 'balanced')
-    val_df = undersample(df[(df['week'] > upper_train_limit) & (df['week'] <= upper_val_limit)])
-    test_df = undersample(df[df['week'] >= lower_test_limit])
+custom_features = FunctionTransformer(create_custom_vars)
 
-    return train_df, val_df, test_df
+preprocessing = ColumnTransformer(
+    [
+        (
+            "Scale",
+            MinMaxScaler(),
+            [
+                "X", "Y", "size", "num_deliver_per_week", "num_visit_per_week", "mean_past_items", "mean_purchases_per_week", "mean_sales_per_week", "weeks_since_last_purchase"
+            ],
+        ),
+        (
+            "One Hot Encoding",
+            OneHotEncoder(sparse_output=False, handle_unknown="ignore"),
+            [
+                "brand", "sub_category", "segment", "package", "customer_type",
+            ],
+        ),
+    ],
+)
 
-def split_data(**kwargs):
-    curr_date_str = f"{kwargs.get("ds")}"
-    prep_df = pd.read_parquet(f"{home_dir}/{curr_date_str}/preprocessed/preprocessed_prev.parquet")
+preprocessing.set_output(transform='pandas')
 
-    train_df, val_df, test_df = week_split(prep_df)
+def get_best_model(experiment_id, date_str):
+    runs = mlflow.search_runs(experiment_id)
+    print(runs)
+    best_model_id = runs.sort_values("metrics.valid_f1")["run_id"].iloc[0]
+    best_model = mlflow.sklearn.load_model("runs:/" + best_model_id + "/model")
 
-    train_df.to_parquet(f"{home_dir}/{curr_date_str}/splits/train.parquet")
-    val_df.to_parquet(f"{home_dir}/{curr_date_str}/splits/val.parquet")
-    test_df.to_parquet(f"{home_dir}/{curr_date_str}/splits/test.parquet")
-    return
+    with open(f'{home_dir}/{date_str}/models/model.pkl','wb') as f:
+        pickle.dump(best_model, f)
+
+    return best_model
+
+
+def create_objective(X_train, y_train, X_val, y_val, model_string, experiment):
+    def objective(trial):
+        # Hiperparametros a optimizar
+        params = {}
+        model = None
+
+        if model_string == "xgb":
+            params  = {
+                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2),
+                "n_estimators": trial.suggest_int("n_estimators", 50, 1000),
+                "max_depth": trial.suggest_int("max_depth", 3, 10),
+                "max_leaves": trial.suggest_int("max_leaves", 0, 100),
+                "min_child_weight": trial.suggest_int("min_child_weight", 1, 5),
+                "reg_alpha": trial.suggest_float("reg_alpha", 0, 1),
+                "reg_lambda": trial.suggest_float("reg_lambda", 0, 1),
+            }
+
+            # Definición de pipeline con prunning
+            pruning_callback = optuna.integration.XGBoostPruningCallback(trial, observation_key="validation_1-pre")
+            model = XGBClassifier(seed=seed, **params, eval_metric='pre' ,callbacks = [pruning_callback])
+        
+        elif model_string == "lgbm":
+            params = {
+                "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2),
+                "n_estimators": trial.suggest_int("n_estimators", 50, 1000),
+                "max_depth": trial.suggest_int("max_depth", 3, 10),
+                "num_leaves": trial.suggest_int("num_leaves", 0, 100),
+                "min_child_weight": trial.suggest_int("min_child_weight", 1, 5),
+                "reg_alpha": trial.suggest_float("reg_alpha", 0, 1),
+                "reg_lambda": trial.suggest_float("reg_lambda", 0, 1),
+            }
+            model = LGBMClassifier(random_state=seed, **params)
+        
+        # Logistic regression
+        else:
+            params = {
+
+            }
+
+            model = LogisticRegression(random_state=seed, **params)
+
+        pipeline = Pipeline(
+            steps=[
+                ("Custom Features", custom_features),
+                ("Preprocessing", preprocessing),
+                ("Classification", model)
+            ]
+        )
+
+        # Evaluación
+        pipeline[:-1].fit(X_train, y_train)
+        X_train_transformed = pipeline[:-1].transform(X_train)
+        X_val_transformed = pipeline[:-1].transform(X_val)
+
+        with mlflow.start_run(run_name=f"{model_string} with {trial.number}", experiment_id=experiment):
+            pipeline.fit(
+                X_train,
+                y_train,
+                Classification__eval_set=[(X_train_transformed, y_train), (X_val_transformed, y_val)],
+                Classification__verbose=False
+                )
+            pred = pipeline.predict(X_val)
+            f1 = f1_score(y_val, pred)
+            mlflow.log_metric("valid_f1", f1)
+            mlflow.log_model("model", pipeline)
+        
+        return f1
+
+    return objective
 
 # trains pipeline and saves it into MLFlow
-def train_model(**kwargs):
+def train_model(model_string,**kwargs):
     curr_date_str = f"{kwargs.get('ds')}"
     train_df = pd.read_parquet(f"{home_dir}/{curr_date_str}/splits/train.parquet")
     val_df = pd.read_parquet(f"{home_dir}/{curr_date_str}/splits/val.parquet")
@@ -119,15 +177,39 @@ def train_model(**kwargs):
     X_val, y_val = val_df.drop(columns=['buy']), val_df['buy']
     X_test, y_test = test_df.drop(columns=['buy']), test_df['buy']
 
-    # define pipeline
-    
-    # adjust parameters, save and train pipeline in mlflow
+    experiment = mlflow.create_experiment(f"train_{curr_date_str}")
 
+    objective_fun = create_objective(X_train=X_train, y_train=y_train, X_val=X_val, y_val=y_val, model_string=model_string, experiment=experiment)
 
+    # Optimización
+    study = optuna.create_study(direction="maximize", sampler=TPESampler(seed=seed))
+    study.optimize(objective_fun, timeout=300)
+
+    # Obtención del mejor modelo
+    best_model_pipeline = get_best_model(experiment, curr_date_str)
+    best_model = best_model_pipeline.named_steps["Classification"]
+    preprocessor = best_model_pipeline.named_steps["Preprocessing"]
+
+    # # Gráficos de Optuna
+    # plot_optimization_history(study).get_figure().savefig(f"plots/exp_{experiment}/optimization_history.png")
+    # plot_param_importances(study).get_figure().savefig(f"plots/exp_{experiment}/param_importances.png")
+
+    # # Respaldo de configuraciones de modelo
+    # with open(f"models/exp_{experiment}/best_config.json", "w") as f:
+    #     json.dump(best_model.get_xgb_params(), f, indent=4)
+
+    # # Respaldo de importancias
+    # importances = best_model.feature_importances_
+    # feature_names = preprocessor.get_feature_names_out()
+
+    # Plotear feature importances
     return
 
 # evaluates model and return metrics to assess drift afterwards
-def evaluate_model():
+def evaluate_model(X_test, y_test):
+    # get test data
+   
+
     # charge best model from mlflow
 
     # get metrics with new data
@@ -136,5 +218,10 @@ def evaluate_model():
     return
 
 # evaluates model and saves csv
-def evaluate_and_save(**kwargs):
+def predict_and_save(**kwargs):
+    curr_date_str = f'{kwargs.get('sd')}'
+    test_df = pd.read_parquet(f"{home_dir}/{curr_date_str}/splits/test.parquet")
+    X_test, y_test = test_df.drop(columns=['buy']), test_df['buy']
+
+    metrics = evaluate_model(X_test, y_test)
     return
