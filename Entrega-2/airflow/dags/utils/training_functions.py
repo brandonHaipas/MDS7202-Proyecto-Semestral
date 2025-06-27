@@ -1,4 +1,7 @@
 import os
+import mlflow.metrics
+import mlflow.sklearn
+import mlflow.sklearn
 import pandas as pd
 import mlflow
 import pickle
@@ -14,10 +17,36 @@ from sklearn.linear_model import LogisticRegression
 from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
 
+from mlflow.tracking import MlflowClient
+from mlflow.exceptions import MlflowException
+
+
 seed = 999
 home_dir = os.getenv("AIRFLOW_HOME")
+MODEL_NAME   = "best_model" 
+MODEL_ALIAS  = "current"
+client = MlflowClient()
 
 
+def register_best_model(run_id):
+    # Registro (crea el modelo si no existe previamente)
+    model_uri = f"runs:/{run_id}/model"
+    mv = mlflow.register_model(model_uri, MODEL_NAME)
+
+    # Promoción con alias
+    client.set_registered_model_alias(MODEL_NAME, MODEL_ALIAS, mv.version)
+
+def get_metric_from_run(run_id, metric_name="valid_f1"):
+    return client.get_run(run_id).data.metrics[metric_name]
+
+def load_current_model_with_metric(metric_name="valid_f1"):
+    mv = client.get_model_version_by_alias(MODEL_NAME, MODEL_ALIAS)
+    model_uri = f"models:/{MODEL_NAME}@{MODEL_ALIAS}"   # alias syntax
+    model = mlflow.sklearn.load_model(model_uri)
+
+    # metric lives on the original run
+    reference_metric = get_metric_from_run(mv.run_id, metric_name)
+    return model, reference_metric
 
 def create_custom_vars(df):
     # Se ordenan las filas temporalmente
@@ -28,7 +57,6 @@ def create_custom_vars(df):
         df.groupby(['customer_id', 'product_id'])['items']
         .transform(lambda x: x.shift(1).expanding().mean())
     )
-
 
     # Sumar items por semana por cliente
     df['weekly_items'] = df.groupby(['customer_id', 'week'])['items'].transform('sum')
@@ -60,41 +88,6 @@ def create_custom_vars(df):
     df['weeks_since_last_purchase'] = df['weeks_since_last_purchase'].fillna(-1)
 
     return df
-
-custom_features = FunctionTransformer(create_custom_vars)
-
-preprocessing = ColumnTransformer(
-    [
-        (
-            "Scale",
-            MinMaxScaler(),
-            [
-                "X", "Y", "size", "num_deliver_per_week", "num_visit_per_week", "mean_past_items", "mean_purchases_per_week", "mean_sales_per_week", "weeks_since_last_purchase"
-            ],
-        ),
-        (
-            "One Hot Encoding",
-            OneHotEncoder(sparse_output=False, handle_unknown="ignore"),
-            [
-                "brand", "sub_category", "segment", "package", "customer_type",
-            ],
-        ),
-    ],
-)
-
-preprocessing.set_output(transform='pandas')
-
-def get_best_model(experiment_id, date_str):
-    runs = mlflow.search_runs(experiment_id)
-    print(runs)
-    best_model_id = runs.sort_values("metrics.valid_f1")["run_id"].iloc[0]
-    best_model = mlflow.sklearn.load_model("runs:/" + best_model_id + "/model")
-
-    with open(f'{home_dir}/{date_str}/models/model.pkl','wb') as f:
-        pickle.dump(best_model, f)
-
-    return best_model
-
 
 def create_objective(X_train, y_train, X_val, y_val, model_string, experiment):
     def objective(trial):
@@ -137,6 +130,27 @@ def create_objective(X_train, y_train, X_val, y_val, model_string, experiment):
 
             model = LogisticRegression(random_state=seed, **params)
 
+        custom_features = FunctionTransformer(create_custom_vars)
+        preprocessing = ColumnTransformer(
+            [
+                (
+                    "Scale",
+                    MinMaxScaler(),
+                    [
+                        "X", "Y", "size", "num_deliver_per_week", "num_visit_per_week", "mean_past_items", "mean_purchases_per_week", "mean_sales_per_week", "weeks_since_last_purchase"
+                    ],
+                ),
+                (
+                    "One Hot Encoding",
+                    OneHotEncoder(sparse_output=False, handle_unknown="ignore"),
+                    [
+                        "brand", "sub_category", "segment", "package", "customer_type",
+                    ],
+                ),
+            ],
+        )
+        preprocessing.set_output(transform='pandas')
+
         pipeline = Pipeline(
             steps=[
                 ("Custom Features", custom_features),
@@ -166,17 +180,20 @@ def create_objective(X_train, y_train, X_val, y_val, model_string, experiment):
 
     return objective
 
+def setup_experiment(**kwargs):
+    # Create a common experiment for all trainings
+    pass
+
 # trains pipeline and saves it into MLFlow
 def train_model(model_string,**kwargs):
     curr_date_str = f"{kwargs.get('ds')}"
     train_df = pd.read_parquet(f"{home_dir}/{curr_date_str}/splits/train.parquet")
     val_df = pd.read_parquet(f"{home_dir}/{curr_date_str}/splits/val.parquet")
-    test_df = pd.read_parquet(f"{home_dir}/{curr_date_str}/splits/test.parquet")
 
     X_train, y_train = train_df.drop(columns=['buy']), train_df['buy']
     X_val, y_val = val_df.drop(columns=['buy']), val_df['buy']
-    X_test, y_test = test_df.drop(columns=['buy']), test_df['buy']
 
+    # Read experiment from XCom
     experiment = mlflow.create_experiment(f"train_{curr_date_str}")
 
     objective_fun = create_objective(X_train=X_train, y_train=y_train, X_val=X_val, y_val=y_val, model_string=model_string, experiment=experiment)
@@ -185,37 +202,39 @@ def train_model(model_string,**kwargs):
     study = optuna.create_study(direction="maximize", sampler=TPESampler(seed=seed))
     study.optimize(objective_fun, timeout=300)
 
-    # Obtención del mejor modelo
-    best_model_pipeline = get_best_model(experiment, curr_date_str)
-    best_model = best_model_pipeline.named_steps["Classification"]
-    preprocessor = best_model_pipeline.named_steps["Preprocessing"]
+    # Obtención del mejor modelo y guardado con mlflow
+    runs = mlflow.search_runs(experiment)
+    best_run_id = runs.sort_values("metrics.valid_f1")["run_id"].iloc[0]
 
-    # # Gráficos de Optuna
-    # plot_optimization_history(study).get_figure().savefig(f"plots/exp_{experiment}/optimization_history.png")
-    # plot_param_importances(study).get_figure().savefig(f"plots/exp_{experiment}/param_importances.png")
-
-    # # Respaldo de configuraciones de modelo
-    # with open(f"models/exp_{experiment}/best_config.json", "w") as f:
-    #     json.dump(best_model.get_xgb_params(), f, indent=4)
-
-    # # Respaldo de importancias
-    # importances = best_model.feature_importances_
-    # feature_names = preprocessor.get_feature_names_out()
-
-    # Plotear feature importances
+    # Register & promote:
+    register_best_model(best_run_id)
     return
 
-# evaluates model and return metrics to assess drift afterwards
-def evaluate_model(X_test, y_test):
-    # get test data
-   
+def select_best_model(**kwargs):
+    # Search in experiment for best model across all trainings
+    pass
 
-    # charge best model from mlflow
+def branch_by_drift(**kwargs):
+    # Get test data
+    curr_date_str = f"{kwargs.get('ds')}"
+    test_df = pd.read_parquet(f"{home_dir}/{curr_date_str}/splits/test.parquet")
+    X_test, y_test = test_df.drop(columns=['buy']), test_df['buy']
 
-    # get metrics with new data
+    # Get current best model
+    try:
+        model, best_f1 = load_current_model_with_metric()
+    except MlflowException:
+        # first day – force training branch
+        return 'train'
 
-    #returns if drift or stay with model
-    return
+    # Evaluate
+    y_pred = model.predict(X_test)
+    f1 = f1_score(y_test, y_pred)
+
+    if f1 < best_f1:
+        return 'train'
+
+    return 'no_train'
 
 # evaluates model and saves csv
 def predict_and_save(**kwargs):
@@ -223,5 +242,16 @@ def predict_and_save(**kwargs):
     test_df = pd.read_parquet(f"{home_dir}/{curr_date_str}/splits/test.parquet")
     X_test, y_test = test_df.drop(columns=['buy']), test_df['buy']
 
-    metrics = evaluate_model(X_test, y_test)
+    # Get current best model with mlflow
+    model, best_f1 = load_current_model_with_metric()
+
+    # Get metrics with new data
+    y_pred = model.predict(X_test)
+    f1 = f1_score(y_test, y_pred)
+
+    mv = client.get_model_version_by_alias(MODEL_NAME, MODEL_ALIAS)
+    with mlflow.start_run(run_name="evaluation", tags={
+            "model_version": mv.version, "alias": MODEL_ALIAS,
+            "type": "drift-check"}):
+        mlflow.log_metrics({"f1": f1, "baseline_f1": best_f1})
     return
