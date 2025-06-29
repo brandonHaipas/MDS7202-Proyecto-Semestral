@@ -91,11 +91,11 @@ select_best_model_task = PythonOperator(
 )
 
 # Task 8 - prediction task (saves to csv)
-
 predict_task = PythonOperator(
     task_id='Prediction_task',
     python_callable = predict_and_save,
-    dag=dag
+    dag=dag,
+    trigger_rule="none_failed_min_one_success"
 )
 
 # pipeline definition

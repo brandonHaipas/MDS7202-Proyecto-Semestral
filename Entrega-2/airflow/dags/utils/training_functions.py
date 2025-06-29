@@ -8,10 +8,9 @@ import pickle
 import json
 import optuna
 from optuna.samplers import TPESampler
-from optuna.visualization.matplotlib import plot_optimization_history, plot_param_importances
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import FunctionTransformer, MinMaxScaler, OneHotEncoder
+from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
 from sklearn.metrics import f1_score
 from sklearn.linear_model import LogisticRegression
 from xgboost import XGBClassifier
@@ -23,9 +22,13 @@ from mlflow.exceptions import MlflowException
 
 seed = 999
 home_dir = os.getenv("AIRFLOW_HOME")
+
+# Mlflow tracking config
+mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
 MODEL_NAME   = "best_model" 
 MODEL_ALIAS  = "current"
 client = MlflowClient()
+mlflow.set_tracking_uri(mlflow_tracking_uri)
 
 
 def register_best_model(run_id):
@@ -65,9 +68,7 @@ def create_objective(X_train, y_train, X_val, y_val, model_string, experiment):
                 "reg_lambda": trial.suggest_float("reg_lambda", 0, 1),
             }
 
-            # Definición de pipeline con prunning
-            pruning_callback = optuna.integration.XGBoostPruningCallback(trial, observation_key="validation_1-pre")
-            model = XGBClassifier(seed=seed, **params, eval_metric='pre' ,callbacks = [pruning_callback])
+            model = XGBClassifier(seed=seed, **params, eval_metric='pre')
         
         elif model_string == "lgbm":
             params = {
@@ -117,29 +118,23 @@ def create_objective(X_train, y_train, X_val, y_val, model_string, experiment):
         )
 
         # Evaluación
-        pipeline[:-1].fit(X_train, y_train)
-        X_train_transformed = pipeline[:-1].transform(X_train)
-        X_val_transformed = pipeline[:-1].transform(X_val)
-
         with mlflow.start_run(run_name=f"{model_string} with {trial.number}", experiment_id=experiment):
             pipeline.fit(
                 X_train,
                 y_train,
-                Classification__eval_set=[(X_train_transformed, y_train), (X_val_transformed, y_val)],
-                Classification__verbose=False
                 )
             pred = pipeline.predict(X_val)
             f1 = f1_score(y_val, pred)
             mlflow.log_params(params)
             mlflow.log_metric("valid_f1", f1)
-            mlflow.log_model("model", pipeline)
+            mlflow.sklearn.log_model(pipeline, artifact_path="model")
         
         return f1
 
     return objective
 
 def setup_experiment(**kwargs):
-    curr_date_str = f"{kwargs.get('ds')}"
+    curr_date_str = f"{kwargs.get('ts')}"
     ti = kwargs['ti']
 
     # Create a common experiment for all trainings
@@ -158,24 +153,20 @@ def train_model(model_string,**kwargs):
     X_val, y_val = val_df.drop(columns=['buy']), val_df['buy']
 
     # Read experiment from XCom
-    experiment = ti.xcom_pull(key='experiment_id', task_ids='Experiment_setup_task')
+    experiment = ti.xcom_pull(key='experiment_id', task_ids='Create_experiment_task')
 
     objective_fun = create_objective(X_train=X_train, y_train=y_train, X_val=X_val, y_val=y_val, model_string=model_string, experiment=experiment)
 
     # Optimización
     study = optuna.create_study(direction="maximize", sampler=TPESampler(seed=seed))
-    study.optimize(objective_fun, timeout=300)
-
-    # Obtención del mejor modelo y guardado con mlflow
-    runs = mlflow.search_runs(experiment)
-    
+    study.optimize(objective_fun, timeout=30)
     return
 
 def select_best_model(**kwargs):
     # Search in experiment for best model across all trainings
     ti = kwargs['ti']
 
-    experiment = ti.xcom_pull(key='experiment_id', task_ids='Experiment_setup_task')
+    experiment = ti.xcom_pull(key='experiment_id', task_ids='Create_experiment_task')
     runs = mlflow.search_runs(experiment)
     best_run_id = runs.sort_values("metrics.valid_f1")["run_id"].iloc[0]
 
@@ -210,7 +201,7 @@ def predict_and_save(**kwargs):
     curr_date_str = f'{kwargs.get("ds")}'
     
     # charge values for next week
-    predict_df = pd.read_parquet(f"{home_dir}/preprocessed/predict.parquet")
+    predict_df = pd.read_parquet(f"{home_dir}/{curr_date_str}/preprocessed/predict.parquet")
 
     # Get current best model with mlflow
     model, best_f1 = load_current_model_with_metric()
@@ -218,16 +209,6 @@ def predict_and_save(**kwargs):
     # Get metrics with new data
     y_pred = model.predict(predict_df)
 
-    print("predict", y_pred)
-    print("")
-
-    # mv = client.get_model_version_by_alias(MODEL_NAME, MODEL_ALIAS)
-    # with mlflow.start_run(run_name="evaluation", tags={
-    #         "model_version": mv.version, "alias": MODEL_ALIAS,
-    #         "type": "drift-check"}):
-    #     mlflow.log_metrics({"f1": f1, "baseline_f1": best_f1})
-
     predict_df['buy'] = y_pred
     buy_df = predict_df[predict_df['buy'] == 1]
-    buy_df[['customer_id', 'product_id']].to_csv(f"{home_dir}/{curr_date_str}/predictions.csv", index=False)
-    return
+    buy_df[['customer_id', 'product_id']].to_csv(f"/predictions/{curr_date_str}.csv", index=False)

@@ -1,0 +1,17 @@
+services:
+  backend:
+    build: ./backend
+    volumes:
+      - ../airflow/mlruns:/mlruns 
+    environment:
+      - MLFLOW_TRACKING_URI=file:/mlruns
+    ports:
+      - "8000:8000"
+
+  frontend:
+    build: ./frontend
+    depends_on: [backend]
+    environment:
+      - BACKEND_URL=http://backend:8000
+    ports:
+      - "7860:7860"

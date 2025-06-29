@@ -6,6 +6,7 @@ WORKDIR /root/airflow
 
 # Establece la variable de entorno AIRFLOW_HOME
 ENV AIRFLOW_HOME=/root/airflow
+ENV MLFLOW_TRACKING_URI=file:/mlruns
 
 # Desactiva los DAGs de ejemplo
 ENV AIRFLOW__CORE__LOAD_EXAMPLES=False
@@ -44,9 +45,12 @@ RUN airflow users create --role Admin --username admin --email admin \
 
 # Copia las carpetas necesarias al contenedor
 COPY ./dags $AIRFLOW_HOME/dags
-COPY ./logs $AIRFLOW_HOME/logs
-COPY ./plugins $AIRFLOW_HOME/plugins
-COPY ./data $AIRFLOW_HOME/data
+COPY ./fixed_data $AIRFLOW_HOME/fixed_data
+
+# Declaracion de puntos de montaje de volumenes
+VOLUME ["/mlruns"]
+VOLUME ["/data"]
+VOLUME ["/predictions"]
 
 # Comando para iniciar el servidor web y el scheduler
 CMD ["sh", "-c", "airflow webserver -p 8080 & airflow scheduler"]

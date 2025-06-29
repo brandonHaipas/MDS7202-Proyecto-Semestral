@@ -7,9 +7,9 @@ import itertools
 home_dir = os.getenv("AIRFLOW_HOME")
 
 # first assumption: clients have certain behaviour in the long run
-clientes_df = pd.read_parquet(f'{home_dir}/data/clientes.parquet')
+clientes_df = pd.read_parquet(f'{home_dir}/fixed_data/clientes.parquet')
 # second assumption: we have product metadata
-productos_df = pd.read_parquet(f'{home_dir}/data/productos.parquet')
+productos_df = pd.read_parquet(f'{home_dir}/fixed_data/productos.parquet')
 
 # since product and client metadata is assumed to be already in the home directory, we can format it however we want
 clientes_categories = ['customer_id', 'region_id', 'zone_id', 'customer_type']
@@ -20,7 +20,6 @@ productos_df[productos_categories] = productos_df[productos_categories].astype('
 
 # random state definition
 RANDOM_STATE = 99
-
 
 
 def drop_suspicious_purchases(transactions):
@@ -51,7 +50,6 @@ def join_data(transactions):
 
 
 def group_by_week(historic_df, sodai_df):
-
     sodai_week_df = sodai_df.copy()
     sodai_week_df = sodai_week_df[sodai_week_df['items'] > 0]
     sodai_week_df['week'] = historic_df['week'].max() + 1
@@ -169,8 +167,8 @@ def load_and_preprocess_data(**kwargs):
     curr_date_str = kwargs.get('ds')
 
     # Leer parquet de esta semana y parquet historico
-    week_df = pd.read_parquet(f"{home_dir}/data/week.parquet")
-    historic_df = pd.read_parquet(f"{home_dir}/data/historic.parquet")
+    week_df = pd.read_parquet(f"/data/week.parquet")
+    historic_df = pd.read_parquet(f"/data/historic.parquet")
     
     # Crear nuevo dataframes de semana agrupada y a predecir
     grouped_week_df, predict_df = create_predict_dataset(historic_df, week_df)

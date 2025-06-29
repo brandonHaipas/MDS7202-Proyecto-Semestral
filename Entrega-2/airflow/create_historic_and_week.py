@@ -71,7 +71,7 @@ hist_transac_df = transactions_df[transactions_df['week']< week_to_use].drop(col
 
 if week_to_use == 52:
 
-    hist_transac_df = transactions_df[transactions_df['week']< week_to_use].drop(columns='week').copy()
+    hist_transac_df = transactions_df[(transactions_df['week'] > 30) & (transactions_df['week'] < week_to_use)].drop(columns='week').copy()
     week_df = transactions_df[transactions_df['week']==week_to_use].drop(columns='week').copy()
 
     clean_hist_transac_df = drop_suspicious_purchases(hist_transac_df)
