@@ -34,31 +34,36 @@ def undersample(df, how='imbalanced'):
 
 
 # this split works well with 10 weeks onward, so the dag should start from the 11th week, that way our preprocessed dataframe has 10 weeks
+# this function now splits the dataframe into test and validation, takes twor a
 # fifth assumption: the dag will have an execution start date 
-def week_split(df):
+def week_split(df, ratio):
     """
-    split weeks into 70, 20 and 10 percent ratio roughly
+    split weeks into training and validation only
+    arguments: df: Dataframe (pandas dataframe)
+               ratio: train/val ratio (float)
+    returns: training and validation dataframes as a tuple
     """
     
     min_week = min(df['week'])
     week_number = len(df['week'].value_counts().index) # the exact number of unique weeks
-    upper_train_limit = ceil(min_week + 0.7*week_number -1)
-    upper_val_limit = ceil(min_week + 0.9*week_number -1)
-    lower_test_limit = upper_val_limit + 1
+    upper_train_limit = ceil(min_week + ratio*week_number -1)
     
     train_df = undersample(df[df['week'] <= upper_train_limit], 'balanced')
-    val_df = undersample(df[(df['week'] > upper_train_limit) & (df['week'] <= upper_val_limit)])
-    test_df = undersample(df[df['week'] >= lower_test_limit])
+    val_df = undersample(df[df['week'] > upper_train_limit], 'balanced')
 
-    return train_df, val_df, test_df
+
+    return train_df, val_df
 
 def split_data(**kwargs):
-    curr_date_str = f"{kwargs.get("ds")}"
-    prep_df = pd.read_parquet(f"{home_dir}/{curr_date_str}/preprocessed/preprocessed_prev.parquet")
+    curr_date_str = f"{kwargs.get('ds')}"
+    historic_prep_df = pd.read_parquet(f"{home_dir}/{curr_date_str}/preprocessed/historic.parquet")
+    week_prep_df = pd.read_parquet(f"{home_dir}/{curr_date_str}/preprocessed/grouped_week.parquet")
 
-    train_df, val_df, test_df = week_split(prep_df)
+    prep_df = pd.concat([historic_prep_df, week_prep_df])
 
-    train_df.to_parquet(f"{home_dir}/{curr_date_str}/splits/train.parquet")
-    val_df.to_parquet(f"{home_dir}/{curr_date_str}/splits/val.parquet")
-    test_df.to_parquet(f"{home_dir}/{curr_date_str}/splits/test.parquet")
+    split_ratio = 0.7
+    train_df, val_df = week_split(prep_df, split_ratio)
+
+    train_df.to_parquet(f"{home_dir}/{curr_date_str}/splits/train.parquet", index=False)
+    val_df.to_parquet(f"{home_dir}/{curr_date_str}/splits/val.parquet", index=False)
     return

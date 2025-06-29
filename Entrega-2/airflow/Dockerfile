@@ -21,12 +21,14 @@ RUN apt-get update && apt-get install -y \
 RUN pip install "apache-airflow[password,sqlite]==2.8.1" --constraint "https://raw.githubusercontent.com/apache/airflow/constraints-2.8.1/constraints-3.10.txt"
 RUN pip install scikit-learn
 RUN pip install pandas
+RUN pip install pyarrow
 RUN pip install numpy
 RUN pip install joblib
 RUN pip install gradio
 RUN pip install xgboost
 RUN pip install lightgbm
 RUN pip install optuna
+RUN pip install mlflow
 RUN pip install optuna-integration[xgboost]
 RUN pip install optuna-integration[lightgbm]
 
@@ -44,6 +46,7 @@ RUN airflow users create --role Admin --username admin --email admin \
 COPY ./dags $AIRFLOW_HOME/dags
 COPY ./logs $AIRFLOW_HOME/logs
 COPY ./plugins $AIRFLOW_HOME/plugins
+COPY ./data $AIRFLOW_HOME/data
 
 # Comando para iniciar el servidor web y el scheduler
 CMD ["sh", "-c", "airflow webserver -p 8080 & airflow scheduler"]

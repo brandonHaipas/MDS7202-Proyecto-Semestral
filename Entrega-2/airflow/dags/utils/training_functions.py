@@ -48,47 +48,6 @@ def load_current_model_with_metric(metric_name="valid_f1"):
     reference_metric = get_metric_from_run(mv.run_id, metric_name)
     return model, reference_metric
 
-def create_custom_vars(df):
-    # Se ordenan las filas temporalmente
-    df = df.sort_values(by=['customer_id', 'product_id', 'week'])
-
-    # Se agrupa para obtener el promedio de items con un shift de 1 (hasta la semana anterior)
-    df['mean_past_items'] = (
-        df.groupby(['customer_id', 'product_id'])['items']
-        .transform(lambda x: x.shift(1).expanding().mean())
-    )
-
-    # Sumar items por semana por cliente
-    df['weekly_items'] = df.groupby(['customer_id', 'week'])['items'].transform('sum')
-
-    # Calcular promedio histórico de compras por semana y cliente, excluyendo la semana actual
-    df['mean_purchases_per_week'] = (
-        df.groupby('customer_id')['weekly_items']
-        .transform(lambda x: x.shift(1).expanding().mean())
-    )
-
-    # Calcular promedio histórico de ventas por semana y producto, excluyendo la semana actual
-    df['mean_sales_per_week'] = (
-        df.groupby('product_id')['weekly_items']
-        .transform(lambda x: x.shift(1).expanding().mean())
-    )
-
-    # Calcular semanas desde la última compra del producto
-    df['week_last_purchase'] = df['week'] * (df['items'] > 0)
-    df['last_week_seen'] = (
-        df.groupby(['customer_id', 'product_id'])['week_last_purchase']
-        .transform(lambda x: x.shift(1).cummax())
-    )
-    df['weeks_since_last_purchase'] = df['week'] - df['last_week_seen']
-
-    # Se completan los valores NaN con -1 (un valor que no puede obtener a través del cálculo)
-    df['mean_past_items'] = df['mean_past_items'].fillna(-1)
-    df['mean_purchases_per_week'] = df['mean_purchases_per_week'].fillna(-1)
-    df['mean_sales_per_week'] = df['mean_sales_per_week'].fillna(-1)
-    df['weeks_since_last_purchase'] = df['weeks_since_last_purchase'].fillna(-1)
-
-    return df
-
 def create_objective(X_train, y_train, X_val, y_val, model_string, experiment):
     def objective(trial):
         # Hiperparametros a optimizar
@@ -130,7 +89,6 @@ def create_objective(X_train, y_train, X_val, y_val, model_string, experiment):
 
             model = LogisticRegression(random_state=seed, **params)
 
-        custom_features = FunctionTransformer(create_custom_vars)
         preprocessing = ColumnTransformer(
             [
                 (
@@ -153,7 +111,6 @@ def create_objective(X_train, y_train, X_val, y_val, model_string, experiment):
 
         pipeline = Pipeline(
             steps=[
-                ("Custom Features", custom_features),
                 ("Preprocessing", preprocessing),
                 ("Classification", model)
             ]
@@ -173,6 +130,7 @@ def create_objective(X_train, y_train, X_val, y_val, model_string, experiment):
                 )
             pred = pipeline.predict(X_val)
             f1 = f1_score(y_val, pred)
+            mlflow.log_params(params)
             mlflow.log_metric("valid_f1", f1)
             mlflow.log_model("model", pipeline)
         
@@ -181,12 +139,18 @@ def create_objective(X_train, y_train, X_val, y_val, model_string, experiment):
     return objective
 
 def setup_experiment(**kwargs):
+    curr_date_str = f"{kwargs.get('ds')}"
+    ti = kwargs['ti']
+
     # Create a common experiment for all trainings
+    experiment = mlflow.create_experiment(f"train_{curr_date_str}")
+    ti.xcom_push(key="experiment_id", value=experiment)
     pass
 
 # trains pipeline and saves it into MLFlow
 def train_model(model_string,**kwargs):
     curr_date_str = f"{kwargs.get('ds')}"
+    ti = kwargs['ti']
     train_df = pd.read_parquet(f"{home_dir}/{curr_date_str}/splits/train.parquet")
     val_df = pd.read_parquet(f"{home_dir}/{curr_date_str}/splits/val.parquet")
 
@@ -194,7 +158,7 @@ def train_model(model_string,**kwargs):
     X_val, y_val = val_df.drop(columns=['buy']), val_df['buy']
 
     # Read experiment from XCom
-    experiment = mlflow.create_experiment(f"train_{curr_date_str}")
+    experiment = ti.xcom_pull(key='experiment_id', task_ids='Experiment_setup_task')
 
     objective_fun = create_objective(X_train=X_train, y_train=y_train, X_val=X_val, y_val=y_val, model_string=model_string, experiment=experiment)
 
@@ -204,54 +168,66 @@ def train_model(model_string,**kwargs):
 
     # Obtención del mejor modelo y guardado con mlflow
     runs = mlflow.search_runs(experiment)
+    
+    return
+
+def select_best_model(**kwargs):
+    # Search in experiment for best model across all trainings
+    ti = kwargs['ti']
+
+    experiment = ti.xcom_pull(key='experiment_id', task_ids='Experiment_setup_task')
+    runs = mlflow.search_runs(experiment)
     best_run_id = runs.sort_values("metrics.valid_f1")["run_id"].iloc[0]
 
     # Register & promote:
     register_best_model(best_run_id)
     return
 
-def select_best_model(**kwargs):
-    # Search in experiment for best model across all trainings
-    pass
-
 def branch_by_drift(**kwargs):
     # Get test data
     curr_date_str = f"{kwargs.get('ds')}"
-    test_df = pd.read_parquet(f"{home_dir}/{curr_date_str}/splits/test.parquet")
-    X_test, y_test = test_df.drop(columns=['buy']), test_df['buy']
+    val_df = pd.read_parquet(f"{home_dir}/{curr_date_str}/splits/val.parquet")
+    X_val, y_val = val_df.drop(columns=['buy']), val_df['buy']
 
     # Get current best model
     try:
         model, best_f1 = load_current_model_with_metric()
     except MlflowException:
         # first day – force training branch
-        return 'train'
+        return 'Create_experiment_task'
 
     # Evaluate
-    y_pred = model.predict(X_test)
-    f1 = f1_score(y_test, y_pred)
+    y_pred = model.predict(X_val)
+    f1 = f1_score(y_val, y_pred)
 
     if f1 < best_f1:
-        return 'train'
+        return 'Create_experiment_task'
 
-    return 'no_train'
+    return 'Prediction_task'
 
 # evaluates model and saves csv
 def predict_and_save(**kwargs):
-    curr_date_str = f'{kwargs.get('sd')}'
-    test_df = pd.read_parquet(f"{home_dir}/{curr_date_str}/splits/test.parquet")
-    X_test, y_test = test_df.drop(columns=['buy']), test_df['buy']
+    curr_date_str = f'{kwargs.get("ds")}'
+    
+    # charge values for next week
+    predict_df = pd.read_parquet(f"{home_dir}/preprocessed/predict.parquet")
 
     # Get current best model with mlflow
     model, best_f1 = load_current_model_with_metric()
 
     # Get metrics with new data
-    y_pred = model.predict(X_test)
-    f1 = f1_score(y_test, y_pred)
+    y_pred = model.predict(predict_df)
 
-    mv = client.get_model_version_by_alias(MODEL_NAME, MODEL_ALIAS)
-    with mlflow.start_run(run_name="evaluation", tags={
-            "model_version": mv.version, "alias": MODEL_ALIAS,
-            "type": "drift-check"}):
-        mlflow.log_metrics({"f1": f1, "baseline_f1": best_f1})
+    print("predict", y_pred)
+    print("")
+
+    # mv = client.get_model_version_by_alias(MODEL_NAME, MODEL_ALIAS)
+    # with mlflow.start_run(run_name="evaluation", tags={
+    #         "model_version": mv.version, "alias": MODEL_ALIAS,
+    #         "type": "drift-check"}):
+    #     mlflow.log_metrics({"f1": f1, "baseline_f1": best_f1})
+
+    predict_df['buy'] = y_pred
+    buy_df = predict_df[predict_df['buy'] == 1]
+    buy_df[['customer_id', 'product_id']].to_csv(f"{home_dir}/{curr_date_str}/predictions.csv", index=False)
     return
