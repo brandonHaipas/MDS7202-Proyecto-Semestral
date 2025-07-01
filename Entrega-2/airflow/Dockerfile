@@ -32,6 +32,7 @@ RUN pip install optuna
 RUN pip install mlflow
 RUN pip install optuna-integration[xgboost]
 RUN pip install optuna-integration[lightgbm]
+RUN pip install shap
 
 # Inicializa la base de datos de Airflow
 RUN airflow db migrate

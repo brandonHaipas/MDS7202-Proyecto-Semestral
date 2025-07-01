@@ -1,17 +1,16 @@
 import os
-import mlflow.metrics
-import mlflow.sklearn
-import mlflow.sklearn
+import numpy as np
 import pandas as pd
 import mlflow
-import pickle
-import json
 import optuna
+import shap
+import matplotlib.pyplot as plt
+
 from optuna.samplers import TPESampler
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import MinMaxScaler, OneHotEncoder
-from sklearn.metrics import f1_score
+from sklearn.metrics import f1_score, accuracy_score, precision_score, recall_score
 from sklearn.linear_model import LogisticRegression
 from xgboost import XGBClassifier
 from lightgbm import LGBMClassifier
@@ -84,9 +83,28 @@ def create_objective(X_train, y_train, X_val, y_val, model_string, experiment):
         
         # Logistic regression
         else:
+            # Hyperparameter suggestions
             params = {
-
+                'C': trial.suggest_float('C', 1e-4, 1e2, log=True),
+                'penalty': trial.suggest_categorical('penalty', ['l1', 'l2', 'elasticnet', None]),
+                'solver': trial.suggest_categorical('solver', ['liblinear', 'lbfgs', 'newton-cg', 'sag', 'saga']),
+                'max_iter': trial.suggest_int('max_iter', 100, 2000),
+                'tol': trial.suggest_float('tol', 1e-6, 1e-2, log=True),
+                'fit_intercept': trial.suggest_categorical('fit_intercept', [True, False]),
+                'class_weight': trial.suggest_categorical('class_weight', [None, 'balanced']),
             }
+            
+            # Handle solver-penalty compatibility
+            if params['penalty'] == 'elasticnet':
+                if params['solver'] != 'saga':
+                    params['solver'] = 'saga'
+                params['l1_ratio'] = trial.suggest_float('l1_ratio', 0.0, 1.0)
+            elif params['penalty'] == 'l1':
+                if params['solver'] not in ['liblinear', 'saga']:
+                    params['solver'] = trial.suggest_categorical('solver_l1', ['liblinear', 'saga'])
+            elif params['penalty'] is None:
+                if params['solver'] in ['liblinear']:
+                    params['solver'] = trial.suggest_categorical('solver_none', ['lbfgs', 'newton-cg', 'sag', 'saga'])
 
             model = LogisticRegression(random_state=seed, **params)
 
@@ -159,11 +177,12 @@ def train_model(model_string,**kwargs):
 
     # Optimización
     study = optuna.create_study(direction="maximize", sampler=TPESampler(seed=seed))
-    study.optimize(objective_fun, timeout=30)
+    study.optimize(objective_fun, timeout=10)
     return
 
 def select_best_model(**kwargs):
     # Search in experiment for best model across all trainings
+    curr_date_str = f"{kwargs.get('ds')}"
     ti = kwargs['ti']
 
     experiment = ti.xcom_pull(key='experiment_id', task_ids='Create_experiment_task')
@@ -172,6 +191,57 @@ def select_best_model(**kwargs):
 
     # Register & promote:
     register_best_model(best_run_id)
+
+    # Get registered best model
+    best_pipeline, best_f1 = load_current_model_with_metric()
+
+    # Read and preprocess train data
+    train_df = pd.read_parquet(f"{home_dir}/{curr_date_str}/splits/train.parquet")
+    val_df = pd.read_parquet(f"{home_dir}/{curr_date_str}/splits/val.parquet")
+
+    X_train = train_df.drop(columns=['buy'])
+    X_val = val_df.drop(columns=['buy'])
+    y_val = val_df['buy']
+
+    pipeline = best_pipeline[:-1]
+
+    X = pd.concat([X_train, X_val])
+    y_pred = best_pipeline.predict(X_val)
+
+    X_pre = pipeline.transform(X)
+    X_pre = X_pre.iloc[np.random.choice(len(X_pre), 1000, replace=False)]
+    X_val_pre = pipeline.transform(X_val)
+    X_val_pre = X_val_pre.iloc[np.random.choice(len(X_val_pre), 1000, replace=False)]
+
+    # Save best model interpretability plots and evaluation metrics
+    with mlflow.start_run(run_id=best_run_id) as run:
+        model = best_pipeline[-1]
+
+        # Evaluation metrics
+        accuracy = accuracy_score(y_val, y_pred)
+        precision = precision_score(y_val, y_pred)
+        recall = recall_score(y_val, y_pred)
+
+        mlflow.log_metric("valid_accuracy", accuracy)
+        mlflow.log_metric("valid_precision", precision)
+        mlflow.log_metric("valid_recall", recall)
+
+        # SHAP summary plot
+        if isinstance(model, LogisticRegression):
+            explainer = shap.LinearExplainer(model, X_pre)
+            shap_values = explainer.shap_values(X_val_pre)
+        else:
+            explainer = shap.TreeExplainer(model, X_pre)
+            shap_values = explainer.shap_values(X_val_pre, approximate=True, check_additivity=False)
+
+        shap.summary_plot(shap_values, X_val_pre, show=False)
+        figure = plt.gcf() 
+        figure.set_size_inches(14, 10)
+        ax = plt.gca()      
+        ax.set_title(f"SHAP summary with best model from {curr_date_str}")
+        mlflow.log_figure(figure, artifact_file="plots/shap_summary_plot.png")
+        plt.close(figure)
+
     return
 
 def branch_by_drift(**kwargs):

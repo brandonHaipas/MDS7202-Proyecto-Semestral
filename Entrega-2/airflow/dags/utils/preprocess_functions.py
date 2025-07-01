@@ -137,8 +137,9 @@ def create_predict_dataset(historic_df, week_df):
     joined_week_df = join_data(cleaned_week_df) # joined with client and product data
     grouped_week_df = group_by_week(historic_df, joined_week_df) # grouped by week number
 
-    # Concat week to historic data to create new historic
+    # Concat week to historic data to create new historic and save
     new_historic_df = pd.concat([historic_df, grouped_week_df])
+    new_historic_df.to_parquet('/data/historic.parquet', index=False)
     
     # Create data for prediction using all clients and products in new historic
     unique_clients = new_historic_df['customer_id'].unique()
