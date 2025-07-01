@@ -61,7 +61,7 @@ def create_objective(X_train, y_train, X_val, y_val, model_string, experiment):
                 "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2),
                 "n_estimators": trial.suggest_int("n_estimators", 50, 1000),
                 "max_depth": trial.suggest_int("max_depth", 3, 10),
-                "max_leaves": trial.suggest_int("max_leaves", 0, 100),
+                "max_leaves": trial.suggest_int("max_leaves", 1, 100),
                 "min_child_weight": trial.suggest_int("min_child_weight", 1, 5),
                 "reg_alpha": trial.suggest_float("reg_alpha", 0, 1),
                 "reg_lambda": trial.suggest_float("reg_lambda", 0, 1),
@@ -74,7 +74,6 @@ def create_objective(X_train, y_train, X_val, y_val, model_string, experiment):
                 "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2),
                 "n_estimators": trial.suggest_int("n_estimators", 50, 1000),
                 "max_depth": trial.suggest_int("max_depth", 3, 10),
-                "num_leaves": trial.suggest_int("num_leaves", 0, 100),
                 "min_child_weight": trial.suggest_int("min_child_weight", 1, 5),
                 "reg_alpha": trial.suggest_float("reg_alpha", 0, 1),
                 "reg_lambda": trial.suggest_float("reg_lambda", 0, 1),
@@ -177,7 +176,7 @@ def train_model(model_string,**kwargs):
 
     # Optimización
     study = optuna.create_study(direction="maximize", sampler=TPESampler(seed=seed))
-    study.optimize(objective_fun, timeout=10)
+    study.optimize(objective_fun, timeout=300)
     return
 
 def select_best_model(**kwargs):
@@ -281,4 +280,4 @@ def predict_and_save(**kwargs):
 
     predict_df['buy'] = y_pred
     buy_df = predict_df[predict_df['buy'] == 1]
-    buy_df[['customer_id', 'product_id']].to_csv(f"/predictions/{curr_date_str}.csv", index=False)
+    buy_df[['customer_id', 'product_id']].to_csv(f"/predictions/{curr_date_str}.csv", index=False, header=False)

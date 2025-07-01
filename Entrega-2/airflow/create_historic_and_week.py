@@ -1,9 +1,9 @@
 import pandas as pd
 import sys
 
-transactions_df = pd.read_parquet("data/transacciones.parquet")
-customers_df = pd.read_parquet("data/clientes.parquet")
-products_df = pd.read_parquet("data/productos.parquet")
+transactions_df = pd.read_parquet("fixed_data/transacciones.parquet")
+customers_df = pd.read_parquet("fixed_data/clientes.parquet")
+products_df = pd.read_parquet("fixed_data/productos.parquet")
 
 customers_categories = ['customer_id', 'region_id', 'zone_id', 'customer_type']
 products_categories = ['product_id', 'brand', 'category', 'sub_category' ,'segment', 'package']
@@ -71,7 +71,7 @@ hist_transac_df = transactions_df[transactions_df['week']< week_to_use].drop(col
 
 if week_to_use == 52:
 
-    hist_transac_df = transactions_df[(transactions_df['week'] > 30) & (transactions_df['week'] < week_to_use)].drop(columns='week').copy()
+    hist_transac_df = transactions_df[transactions_df['week'] < week_to_use].drop(columns='week').copy()
     week_df = transactions_df[transactions_df['week']==week_to_use].drop(columns='week').copy()
 
     clean_hist_transac_df = drop_suspicious_purchases(hist_transac_df)
