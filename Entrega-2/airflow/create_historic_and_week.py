@@ -52,8 +52,20 @@ args = sys.argv
 
 week_to_use = 52
 
+transactions_df['week'] = transactions_df['purchase_date'].apply(lambda x: x.isocalendar().week)
+
+
 if len(args) > 1:
     week_to_use = sys.argv[1]
+
+if week_to_use == 'full':
+    hist_transac_df = transactions_df.drop(columns='week').copy()
+    clean_hist_transac_df = drop_suspicious_purchases(hist_transac_df)
+    joined_hist_df = join_data(clean_hist_transac_df)
+    grouped_hist_df = group_by_week(joined_hist_df)
+
+    grouped_hist_df.to_parquet("historic.parquet")
+    quit()
 
 # add intermediate column with iso calendar week
 if int(week_to_use) != 52 and (not week_to_use.isnumeric()):
@@ -63,7 +75,6 @@ if int(week_to_use) <= 11:
     raise Exception("number of weeks too low")
 
 
-transactions_df['week'] = transactions_df['purchase_date'].apply(lambda x: x.isocalendar().week)
 
 # now separate transactions_df in week(s) and historic
 

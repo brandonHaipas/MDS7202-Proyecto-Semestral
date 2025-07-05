@@ -17,11 +17,15 @@ from lightgbm import LGBMClassifier
 
 from mlflow.tracking import MlflowClient
 from mlflow.exceptions import MlflowException
+import random
+
 
 
 seed = 999
 home_dir = os.getenv("AIRFLOW_HOME")
-
+random.seed(seed)
+np.random.seed(seed)
+os.environ["PYTHONHASHSEED"] = str(seed)
 # Mlflow tracking config
 mlflow_tracking_uri = os.getenv("MLFLOW_TRACKING_URI")
 MODEL_NAME   = "best_model" 
@@ -176,7 +180,7 @@ def train_model(model_string,**kwargs):
 
     # Optimización
     study = optuna.create_study(direction="maximize", sampler=TPESampler(seed=seed))
-    study.optimize(objective_fun, timeout=300)
+    study.optimize(objective_fun, timeout=1200)
     return
 
 def select_best_model(**kwargs):
@@ -186,7 +190,7 @@ def select_best_model(**kwargs):
 
     experiment = ti.xcom_pull(key='experiment_id', task_ids='Create_experiment_task')
     runs = mlflow.search_runs(experiment)
-    best_run_id = runs.sort_values("metrics.valid_f1")["run_id"].iloc[0]
+    best_run_id = runs.sort_values("metrics.valid_f1", ascending=False)["run_id"].iloc[0]
 
     # Register & promote:
     register_best_model(best_run_id)

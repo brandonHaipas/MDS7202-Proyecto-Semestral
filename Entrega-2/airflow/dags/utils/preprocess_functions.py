@@ -119,6 +119,7 @@ def add_negative_class_rows(df, how='inbalanced'):
         negative_df = negative_df.sample(len(df), random_state=RANDOM_STATE)
 
     # Añadir filas a dataset
+
     sodai_negative_df = negative_df.merge(productos_df, on='product_id').merge(clientes_df, on='customer_id')
     sodai_negative_df['buy'] = 0
     sodai_negative_df['items'] = 0
@@ -176,7 +177,7 @@ def load_and_preprocess_data(**kwargs):
 
     # Crear variables custom en dataframe historico, de semana agrupada y a predecir
     full_hist_df = pd.concat([historic_df, week_df])
-    full_hist_neg_df = add_negative_class_rows(full_hist_df)
+    full_hist_neg_df = add_negative_class_rows(full_hist_df, how='balanced')
 
     full_df = pd.concat([full_hist_neg_df, predict_df])
     full_df = create_custom_vars(full_df)
