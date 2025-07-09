@@ -1,0 +1,14 @@
+artifact_uri: file:///mlruns/838258539849132144/3bb7677277f247538eaa054563a405e7/artifacts
+end_time: 1752010789572
+entry_point_name: ''
+experiment_id: '838258539849132144'
+lifecycle_stage: active
+run_id: 3bb7677277f247538eaa054563a405e7
+run_name: lgbm with 222
+source_name: ''
+source_type: 4
+source_version: ''
+start_time: 1752010489305
+status: 3
+tags: []
+user_id: root
